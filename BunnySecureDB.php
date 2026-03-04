@@ -1,11 +1,20 @@
 <?php
 /**
  * BunnySecureDB
- * A SecureDB-style PHP class for Bunny.net Bunny Database via HTTP SQL API (/v2/pipeline).
+ * SecureDB-style PHP wrapper for Bunny.net Database via HTTP SQL API (/v2/pipeline).
  *
- * Docs: https://docs.bunny.net/database/connect/sql-api
- * Endpoint format: https://[db-id].lite.bunnydb.net/v2/pipeline
+ * Endpoint format:
+ *   libsql://<DB-ID>.lite.bunnydb.net/
+ *
+ * Usage:
+ *   $db = BunnySecureDB::getInstance([
+ *     'endpoint' => 'libsql://xxx.lite.bunnydb.net/' 
+ *     'token' => 'YOUR_RW_OR_RO_TOKEN',
+ *     'timeout' => 20
+ *   ]);
  */
+
+declare(strict_types=1);
 
 class BunnySecureDBException extends Exception {}
 
@@ -13,11 +22,11 @@ class BunnySecureDB
 {
     private static ?self $instance = null;
 
-    private string $endpoint;   // https://xxx.lite.bunnydb.net/v2/pipeline
-    private string $token;      // access token (Bearer)
+    private string $endpoint;
+    private string $token;
     private int $timeout = 15;
 
-    // Fluent state (SecureDB-like)
+    // Fluent state
     private string $fluentTable = '';
     private array $fluentWhere = [];
     private int $fluentBatchSize = 1000;
@@ -28,14 +37,24 @@ class BunnySecureDB
 
     private function __construct(array $config)
     {
-        $endpoint = $config['endpoint'] ?? $config['url'] ?? '';
-        $token    = $config['token'] ?? $config['access_token'] ?? '';
+        $endpoint = (string)($config['endpoint'] ?? $config['url'] ?? $config['connection_url'] ?? '');
+        $token    = (string)($config['token'] ?? $config['access_token'] ?? '');
 
-        if (!$endpoint || !$token) {
-            throw new BunnySecureDBException("Missing config. Provide 'endpoint' (or 'url') and 'token' (or 'access_token').");
+        if ($endpoint === '') {
+            throw new BunnySecureDBException("Missing config. Provide 'endpoint' (or 'url' / 'connection_url').");
         }
 
-        $this->endpoint = rtrim($endpoint, '/');
+        $this->endpoint = $this->normalizeEndpoint($endpoint);
+
+        // Optional: support token provided in URL query for seamless libsql-style configs.
+        if ($token === '') {
+            $token = $this->extractTokenFromUrl($endpoint);
+        }
+
+        if ($token === '') {
+            throw new BunnySecureDBException("Missing token. Provide 'token' (or 'access_token'), or include token/authToken in URL query.");
+        }
+
         $this->token = $token;
 
         if (isset($config['timeout'])) {
@@ -43,6 +62,47 @@ class BunnySecureDB
         }
     }
 
+    private function normalizeEndpoint(string $endpoint): string
+    {
+        $endpoint = trim($endpoint);
+        if ($endpoint === '') {
+            throw new BunnySecureDBException("Empty endpoint/url provided.");
+        }
+
+        // Accept libsql://<host>/ and convert to Bunny pipeline endpoint.
+        if (preg_match('#^libsql://#i', $endpoint) === 1) {
+            $parts = parse_url($endpoint);
+            $host = (string)($parts['host'] ?? '');
+            if ($host === '') {
+                throw new BunnySecureDBException("Invalid libsql URL. Expected: libsql://<DB-ID>.lite.bunnydb.net/");
+            }
+            return "https://{$host}/v2/pipeline";
+        }
+
+        $endpoint = rtrim($endpoint, '/');
+        if (!preg_match('#/v2/pipeline$#', $endpoint)) {
+            $endpoint .= '/v2/pipeline';
+        }
+        return $endpoint;
+    }
+
+    private function extractTokenFromUrl(string $url): string
+    {
+        $query = (string)(parse_url($url, PHP_URL_QUERY) ?? '');
+        if ($query === '') {
+            return '';
+        }
+
+        parse_str($query, $params);
+        if (!is_array($params)) {
+            return '';
+        }
+
+        $token = (string)($params['token'] ?? $params['authToken'] ?? '');
+        return trim($token);
+    }
+
+    /** Singleton */
     public static function getInstance(array $config = []): self
     {
         if (self::$instance === null) {
@@ -54,10 +114,11 @@ class BunnySecureDB
         return self::$instance;
     }
 
-    /* =========================
-     * Public: basic querying
-     * ========================= */
+    /* =========================================================
+     * Basic Query API
+     * ========================================================= */
 
+    /** SELECT-only convenience */
     public function select(string $sql, array $params = []): array
     {
         $res = $this->executePipeline([
@@ -75,11 +136,11 @@ class BunnySecureDB
     }
 
     /**
-     * Like SecureDB::query():
-     * - SELECT => array rows
-     * - INSERT => last_insert_rowid (int|null)
+     * SecureDB-like query():
+     * - SELECT/PRAGMA => array rows
+     * - INSERT        => last_insert_rowid (int|null)
      * - UPDATE/DELETE => affected_row_count (int)
-     * - DDL/other => true
+     * - Other         => true
      */
     public function query(string $sql, array $params = []): mixed
     {
@@ -100,10 +161,103 @@ class BunnySecureDB
         };
     }
 
-    /* =========================
-     * CRUD (SecureDB-like)
-     * ========================= */
+    /* =========================================================
+     * CRUD Helpers (SecureDB vibe)
+     * ========================================================= */
 
+    public function from(string $table, array $columns = ['*']): self
+    {
+        $this->reset();
+        $this->fluentTable = $this->validateTableName($table);
+        $this->fluentOperation = 'select';
+        $this->fluentColumns = $columns;
+        return $this;
+    }
+
+    public function where(array $conditions): self|int
+    {
+        $this->fluentWhere = $conditions;
+
+        // Convenience: delete('table')->where([...]) runs immediately
+        if ($this->fluentOperation === 'delete' && $this->fluentTable) {
+            return $this->executeDelete();
+        }
+
+        return $this;
+    }
+
+    public function orderBy(string $column, string $direction = 'ASC'): self
+    {
+        if ($this->fluentOperation !== 'select') {
+            throw new BunnySecureDBException("orderBy() can only be used with SELECT operations.");
+        }
+
+        $direction = strtoupper($direction);
+        if (!in_array($direction, ['ASC', 'DESC'], true)) {
+            throw new BunnySecureDBException("Invalid order direction. Use ASC or DESC.");
+        }
+
+        $column = $this->validateColumnName($column);
+        $this->fluentOrderBy = $this->quoteIdent($column) . " $direction";
+        return $this;
+    }
+
+    public function limit(int $count): self
+    {
+        if ($this->fluentOperation !== 'select') {
+            throw new BunnySecureDBException("limit() can only be used with SELECT operations.");
+        }
+        $this->fluentLimit = max(0, $count);
+        return $this;
+    }
+
+    public function get(): array
+    {
+        if ($this->fluentOperation !== 'select' || $this->fluentTable === '') {
+            throw new BunnySecureDBException("Use from('table')->get()");
+        }
+
+        $cols = $this->fluentColumns;
+        $colSql = '*';
+        if (!empty($cols) && !($cols === ['*'])) {
+            $colSql = implode(', ', array_map(function ($c) {
+                if ($c === '*') return '*';
+                return $this->quoteIdent($this->validateColumnName((string)$c));
+            }, $cols));
+        }
+
+        $sql = "SELECT $colSql FROM {$this->quoteIdent($this->fluentTable)}";
+        $args = [];
+
+        if (!empty($this->fluentWhere)) {
+            $whereCols = array_keys($this->fluentWhere);
+            $whereSql = implode(' AND ', array_map(function ($c) {
+                $c = (string)$c;
+                return $this->quoteIdent($this->validateColumnName($c)) . " = ?";
+            }, $whereCols));
+
+            $sql .= " WHERE $whereSql";
+            $args = array_values($this->fluentWhere);
+        }
+
+        if ($this->fluentOrderBy !== '') {
+            $sql .= " ORDER BY {$this->fluentOrderBy}";
+        }
+        if ($this->fluentLimit > 0) {
+            $sql .= " LIMIT {$this->fluentLimit}";
+        }
+
+        $res = $this->executePipeline([
+            $this->buildExecuteRequest($sql, $args),
+            ["type" => "close"],
+        ]);
+
+        $rows = $this->extractRowsFromPipeline($res, 0);
+        $this->reset();
+        return $rows;
+    }
+
+    /** Quick insert: insert('table', [data]) => last_insert_id */
     public function insert(string $table, array $data = []): int|self
     {
         if (!empty($data)) {
@@ -114,6 +268,7 @@ class BunnySecureDB
             $placeholders = implode(', ', array_fill(0, count($cols), '?'));
 
             $sql = "INSERT INTO {$this->quoteIdent($table)} ($colList) VALUES ($placeholders)";
+
             $res = $this->executePipeline([
                 $this->buildExecuteRequest($sql, array_values($data)),
                 ["type" => "close"],
@@ -129,9 +284,10 @@ class BunnySecureDB
         return $this;
     }
 
+    /** Fluent insert('table')->row([data]) */
     public function row(array $data): int
     {
-        if ($this->fluentOperation !== 'insert' || !$this->fluentTable) {
+        if ($this->fluentOperation !== 'insert' || $this->fluentTable === '') {
             throw new BunnySecureDBException("Use insert('table')->row([...])");
         }
         if (empty($data)) {
@@ -145,6 +301,7 @@ class BunnySecureDB
         $placeholders = implode(', ', array_fill(0, count($cols), '?'));
 
         $sql = "INSERT INTO {$this->quoteIdent($table)} ($colList) VALUES ($placeholders)";
+
         $res = $this->executePipeline([
             $this->buildExecuteRequest($sql, array_values($data)),
             ["type" => "close"],
@@ -155,6 +312,7 @@ class BunnySecureDB
         return isset($result['last_insert_rowid']) ? (int)$result['last_insert_rowid'] : 0;
     }
 
+    /** Quick bulk insert: insertMultiple('table', $rows, $batchSize) => total inserted */
     public function insertMultiple(string $table, array $rows = [], int $batchSize = 1000): int|self
     {
         if (!empty($rows)) {
@@ -164,7 +322,7 @@ class BunnySecureDB
         $this->reset();
         $this->fluentTable = $this->validateTableName($table);
         $this->fluentOperation = 'insertMultiple';
-        $this->fluentBatchSize = $batchSize;
+        $this->fluentBatchSize = max(1, $batchSize);
         return $this;
     }
 
@@ -174,9 +332,10 @@ class BunnySecureDB
         return $this;
     }
 
+    /** Fluent insertMultiple('table')->batch(500)->rows([...]) */
     public function rows(array $rows): int
     {
-        if ($this->fluentOperation !== 'insertMultiple' || !$this->fluentTable) {
+        if ($this->fluentOperation !== 'insertMultiple' || $this->fluentTable === '') {
             throw new BunnySecureDBException("Use insertMultiple('table')->rows([...])");
         }
         $total = $this->executeInsertMultiple($this->fluentTable, $rows, $this->fluentBatchSize);
@@ -184,16 +343,17 @@ class BunnySecureDB
         return $total;
     }
 
+    /** Quick update: update('table', [set], [where]) => affected */
     public function update(string $table, array $data = [], array $where = []): int|self
     {
         if (!empty($data) && !empty($where)) {
             $table = $this->validateTableName($table);
 
             $setCols = array_keys($data);
-            $setSql = implode(', ', array_map(fn($c) => $this->quoteIdent($c) . " = ?", $setCols));
+            $setSql = implode(', ', array_map(fn($c) => $this->quoteIdent((string)$c) . " = ?", $setCols));
 
             $whereCols = array_keys($where);
-            $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent($c) . " = ?", $whereCols));
+            $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent((string)$c) . " = ?", $whereCols));
 
             $sql = "UPDATE {$this->quoteIdent($table)} SET $setSql WHERE $whereSql";
             $args = array_merge(array_values($data), array_values($where));
@@ -213,15 +373,55 @@ class BunnySecureDB
         return $this;
     }
 
+    /** Fluent update('table')->where([...])->change([set]) */
+    public function change(array $data): int
+    {
+        if ($this->fluentOperation !== 'update' || $this->fluentTable === '') {
+            throw new BunnySecureDBException("Use update('table')->where([...])->change([...])");
+        }
+        if (empty($this->fluentWhere)) {
+            throw new BunnySecureDBException("No WHERE specified. Use where([...]) first.");
+        }
+        if (empty($data)) {
+            throw new BunnySecureDBException("No data provided for update.");
+        }
+
+        $setCols = array_keys($data);
+        $setSql = implode(', ', array_map(function ($c) {
+            $c = $this->validateColumnName((string)$c);
+            return $this->quoteIdent($c) . " = ?";
+        }, $setCols));
+
+        $whereCols = array_keys($this->fluentWhere);
+        $whereSql = implode(' AND ', array_map(function ($c) {
+            $c = $this->validateColumnName((string)$c);
+            return $this->quoteIdent($c) . " = ?";
+        }, $whereCols));
+
+        $sql = "UPDATE {$this->quoteIdent($this->fluentTable)} SET $setSql WHERE $whereSql";
+        $args = array_merge(array_values($data), array_values($this->fluentWhere));
+
+        $res = $this->executePipeline([
+            $this->buildExecuteRequest($sql, $args),
+            ["type" => "close"],
+        ]);
+
+        $result = $this->extractResultFromPipeline($res, 0);
+        $this->reset();
+        return (int)($result['affected_row_count'] ?? 0);
+    }
+
+    /** Quick delete: delete('table', [where]) => affected */
     public function delete(string $table, array $where = []): int|self
     {
         if (!empty($where)) {
             $table = $this->validateTableName($table);
 
             $whereCols = array_keys($where);
-            $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent($c) . " = ?", $whereCols));
+            $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent((string)$c) . " = ?", $whereCols));
 
             $sql = "DELETE FROM {$this->quoteIdent($table)} WHERE $whereSql";
+
             $res = $this->executePipeline([
                 $this->buildExecuteRequest($sql, array_values($where)),
                 ["type" => "close"],
@@ -237,131 +437,72 @@ class BunnySecureDB
         return $this;
     }
 
-    public function from(string $table, array $columns = ['*']): self
+    /** Create table helper: createTable('table', [columns], true) => success */
+    public function createTable(string $table, array $columns, bool $ifNotExists = true): bool
     {
-        $this->reset();
-        $this->fluentTable = $this->validateTableName($table);
-        $this->fluentOperation = 'select';
-        $this->fluentColumns = $columns;
-        return $this;
-    }
-
-    public function where(array $conditions): self|int
-    {
-        $this->fluentWhere = $conditions;
-
-        // SecureDB-style convenience: delete()->where() executes immediately
-        if ($this->fluentOperation === 'delete' && $this->fluentTable) {
-            return $this->executeDelete();
+        if (empty($columns)) {
+            throw new BunnySecureDBException("No columns provided for table creation.");
         }
 
-        return $this;
-    }
+        $table = $this->validateTableName($table);
+        $ifNotExistsSql = $ifNotExists ? ' IF NOT EXISTS' : '';
 
-    public function orderBy(string $column, string $direction = 'ASC'): self
-    {
-        if ($this->fluentOperation !== 'select') {
-            throw new BunnySecureDBException("orderBy() can only be used with SELECT operations.");
-        }
-        $direction = strtoupper($direction);
-        if (!in_array($direction, ['ASC', 'DESC'], true)) {
-            throw new BunnySecureDBException("Invalid order direction. Use ASC or DESC.");
-        }
-        $column = $this->validateColumnName($column);
-        $this->fluentOrderBy = $this->quoteIdent($column) . " $direction";
-        return $this;
-    }
+        $columnDefinitions = [];
+        foreach ($columns as $name => $definition) {
+            $name = (string)$name;
+            $definition = trim((string)$definition);
 
-    public function limit(int $count): self
-    {
-        if ($this->fluentOperation !== 'select') {
-            throw new BunnySecureDBException("limit() can only be used with SELECT operations.");
-        }
-        $this->fluentLimit = max(0, $count);
-        return $this;
-    }
-
-    public function get(): array
-    {
-        if ($this->fluentOperation !== 'select' || !$this->fluentTable) {
-            throw new BunnySecureDBException("Use from('table')->get()");
+            // Handle table constraints (FOREIGN KEY, CHECK, etc.) - they don't have a column name
+            if (empty($definition)) {
+                $columnDefinitions[] = $name;
+            } else {
+                // Regular column: validate name, use definition as-is
+                if (preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $name)) {
+                    $columnDefinitions[] = $this->quoteIdent($name) . ' ' . $definition;
+                } else {
+                    // If name doesn't match column pattern, treat it as a table constraint
+                    $columnDefinitions[] = $name;
+                }
+            }
         }
 
-        $cols = $this->fluentColumns;
-        $colSql = '*';
-        if (!empty($cols) && !($cols === ['*'])) {
-            $colSql = implode(', ', array_map(fn($c) => $c === '*' ? '*' : $this->quoteIdent($this->validateColumnName($c)), $cols));
-        }
+        $columnsSql = implode(', ', $columnDefinitions);
+        $sql = "CREATE TABLE{$ifNotExistsSql} {$this->quoteIdent($table)} ($columnsSql)";
 
-        $sql = "SELECT $colSql FROM {$this->quoteIdent($this->fluentTable)}";
-        $args = [];
-
-        if (!empty($this->fluentWhere)) {
-            $whereCols = array_keys($this->fluentWhere);
-            $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent($this->validateColumnName($c)) . " = ?", $whereCols));
-            $sql .= " WHERE $whereSql";
-            $args = array_values($this->fluentWhere);
-        }
-
-        if ($this->fluentOrderBy) {
-            $sql .= " ORDER BY {$this->fluentOrderBy}";
-        }
-        if ($this->fluentLimit > 0) {
-            $sql .= " LIMIT {$this->fluentLimit}";
-        }
-
-        $res = $this->executePipeline([
-            $this->buildExecuteRequest($sql, $args),
+        $this->executePipeline([
+            $this->buildExecuteRequest($sql, []),
             ["type" => "close"],
         ]);
 
-        $rows = $this->extractRowsFromPipeline($res, 0);
         $this->reset();
-        return $rows;
+        return true;
     }
 
-    public function change(array $data): int
+    /** Drop table helper: deleteTable('table', true) => success */
+    public function deleteTable(string $table, bool $ifExists = true): bool
     {
-        if ($this->fluentOperation !== 'update' || !$this->fluentTable) {
-            throw new BunnySecureDBException("Use update('table')->where([...])->change([...])");
-        }
-        if (empty($this->fluentWhere)) {
-            throw new BunnySecureDBException("No WHERE specified. Use where([...]) first.");
-        }
-        if (empty($data)) {
-            throw new BunnySecureDBException("No data provided for update.");
-        }
+        $table = $this->validateTableName($table);
+        $ifExistsSql = $ifExists ? ' IF EXISTS' : '';
+        $sql = "DROP TABLE{$ifExistsSql} {$this->quoteIdent($table)}";
 
-        $setCols = array_keys($data);
-        $setSql = implode(', ', array_map(fn($c) => $this->quoteIdent($this->validateColumnName($c)) . " = ?", $setCols));
-
-        $whereCols = array_keys($this->fluentWhere);
-        $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent($this->validateColumnName($c)) . " = ?", $whereCols));
-
-        $sql = "UPDATE {$this->quoteIdent($this->fluentTable)} SET $setSql WHERE $whereSql";
-        $args = array_merge(array_values($data), array_values($this->fluentWhere));
-
-        $res = $this->executePipeline([
-            $this->buildExecuteRequest($sql, $args),
+        $this->executePipeline([
+            $this->buildExecuteRequest($sql, []),
             ["type" => "close"],
         ]);
 
-        $result = $this->extractResultFromPipeline($res, 0);
         $this->reset();
-        return (int)($result['affected_row_count'] ?? 0);
+        return true;
     }
 
-    public function execute(): int
+    /** Alias: dropTable('table', true) => success */
+    public function dropTable(string $table, bool $ifExists = true): bool
     {
-        return match ($this->fluentOperation) {
-            'delete' => $this->executeDelete(),
-            default => throw new BunnySecureDBException("Nothing to execute. Use get()/row()/rows()/change() depending on operation."),
-        };
+        return $this->deleteTable($table, $ifExists);
     }
 
-    /* =========================
-     * Internals: bulk insert
-     * ========================= */
+    /* =========================================================
+     * Internals: Bulk insert
+     * ========================================================= */
 
     private function executeInsertMultiple(string $table, array $rows, int $batchSize): int
     {
@@ -369,7 +510,7 @@ class BunnySecureDB
             throw new BunnySecureDBException("No rows provided for bulk insert.");
         }
 
-        // Ensure consistent columns
+        // Ensure consistent keys across rows
         $columns = array_keys($rows[0]);
         foreach ($rows as $r) {
             if (array_keys($r) !== $columns) {
@@ -383,8 +524,9 @@ class BunnySecureDB
         $insertSql = "INSERT INTO $tableQ ($colList) VALUES ($placeholders)";
 
         $total = 0;
+        $batchSize = max(1, $batchSize);
 
-        foreach (array_chunk($rows, max(1, $batchSize)) as $batch) {
+        foreach (array_chunk($rows, $batchSize) as $batch) {
             $requests = [];
 
             // Transaction per batch
@@ -397,8 +539,7 @@ class BunnySecureDB
 
             $res = $this->executePipeline($requests);
 
-            // Sum affected rows from each insert execute in this batch
-            // indexes: 0 BEGIN, then inserts, then COMMIT, then close
+            // BEGIN is result[0], inserts are result[1..n], COMMIT is result[n+1]
             for ($i = 1; $i <= count($batch); $i++) {
                 $result = $this->extractResultFromPipeline($res, $i);
                 $total += (int)($result['affected_row_count'] ?? 0);
@@ -408,13 +549,9 @@ class BunnySecureDB
         return $total;
     }
 
-    /* =========================
-     * Internals: delete exec
-     * ========================= */
-
     private function executeDelete(): int
     {
-        if (!$this->fluentTable) {
+        if ($this->fluentTable === '') {
             throw new BunnySecureDBException("No table specified. Use delete('table') first.");
         }
         if (empty($this->fluentWhere)) {
@@ -422,7 +559,10 @@ class BunnySecureDB
         }
 
         $whereCols = array_keys($this->fluentWhere);
-        $whereSql = implode(' AND ', array_map(fn($c) => $this->quoteIdent($this->validateColumnName($c)) . " = ?", $whereCols));
+        $whereSql = implode(' AND ', array_map(function ($c) {
+            $c = $this->validateColumnName((string)$c);
+            return $this->quoteIdent($c) . " = ?";
+        }, $whereCols));
 
         $sql = "DELETE FROM {$this->quoteIdent($this->fluentTable)} WHERE $whereSql";
         $args = array_values($this->fluentWhere);
@@ -438,9 +578,9 @@ class BunnySecureDB
         return $count;
     }
 
-    /* =========================
-     * Internals: pipeline + parsing
-     * ========================= */
+    /* =========================================================
+     * Internals: Pipeline + Parsing
+     * ========================================================= */
 
     private function executePipeline(array $requests): array
     {
@@ -473,12 +613,12 @@ class BunnySecureDB
             throw new BunnySecureDBException("Invalid JSON response (HTTP $code): $raw");
         }
 
-        // Hrana pipeline errors appear inside results too
+        // Pipeline errors can come back in results
         if (isset($json['results']) && is_array($json['results'])) {
             foreach ($json['results'] as $idx => $r) {
                 if (($r['type'] ?? '') === 'error') {
                     $msg = $r['error']['message'] ?? 'Unknown pipeline error';
-                    throw new BunnySecureDBException("Pipeline error at result[$idx]: $msg");
+                    throw new BunnySecureDBException("Pipeline error at results[$idx]: $msg");
                 }
             }
         }
@@ -492,7 +632,7 @@ class BunnySecureDB
 
     private function buildExecuteRequest(string $sql, array $params): array
     {
-        // Bunny SQL API supports positional args OR named_args. :contentReference[oaicite:2]{index=2}
+        // Supports positional args OR named_args (assoc array)
         if ($this->isAssoc($params)) {
             $named = [];
             foreach ($params as $name => $value) {
@@ -540,7 +680,6 @@ class BunnySecureDB
 
         $resp = $r['response'] ?? [];
         if (($resp['type'] ?? '') !== 'execute') {
-            // BEGIN/COMMIT/close etc. may return different shapes
             return $resp;
         }
 
@@ -569,7 +708,7 @@ class BunnySecureDB
             $assoc = [];
             foreach ($row as $i => $cell) {
                 $name = $colNames[$i] ?? "col_$i";
-                $assoc[$name] = $this->decodeValue($cell);
+                $assoc[$name] = $this->decodeValue(is_array($cell) ? $cell : ["type" => "null"]);
             }
             $out[] = $assoc;
         }
@@ -579,34 +718,19 @@ class BunnySecureDB
 
     private function encodeValue(mixed $v): array
     {
-        // Bunny SQL API value types: null/integer/float/text/blob. :contentReference[oaicite:3]{index=3}
-        if ($v === null) {
-            return ["type" => "null"];
-        }
+        // Types: null/integer/float/text/blob (blob expects base64 string)
+        if ($v === null) return ["type" => "null"];
 
-        if (is_int($v)) {
-            return ["type" => "integer", "value" => (string)$v];
-        }
+        if (is_int($v)) return ["type" => "integer", "value" => (string)$v];
+        if (is_float($v)) return ["type" => "float", "value" => (string)$v];
+        if (is_bool($v)) return ["type" => "integer", "value" => ($v ? "1" : "0")];
 
-        if (is_float($v)) {
-            return ["type" => "float", "value" => (string)$v];
-        }
+        if (is_string($v)) return ["type" => "text", "value" => $v];
 
-        if (is_bool($v)) {
-            // SQLite commonly stores as integer 0/1
-            return ["type" => "integer", "value" => $v ? "1" : "0"];
-        }
-
-        if (is_string($v)) {
-            return ["type" => "text", "value" => $v];
-        }
-
-        // Arrays/objects -> JSON text by default (practical for app usage)
         if (is_array($v) || is_object($v)) {
             return ["type" => "text", "value" => json_encode($v, JSON_UNESCAPED_SLASHES)];
         }
 
-        // Fallback
         return ["type" => "text", "value" => (string)$v];
     }
 
@@ -676,8 +800,9 @@ class BunnySecureDB
 
     private function quoteIdent(string $ident): string
     {
-        // SQLite-safe identifier quoting
         $ident = str_replace('"', '""', $ident);
         return "\"$ident\"";
     }
 }
+
+?>
