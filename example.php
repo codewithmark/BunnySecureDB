@@ -8,18 +8,19 @@ function db_connect() {
         'token'    => 'YOUR_RW_OR_RO_TOKEN'
     ]);
 }
+const TABLE_NAME = 'users';
 
 function db_select(?int $id = null): array {
     $db = db_connect();
     if ($id !== null) {
-        return $db->select("SELECT * FROM users1 WHERE id = ?", [$id]);
+        return $db->select('SELECT * FROM ' . TABLE_NAME . ' WHERE id = ?', [$id]);
     }
-    return $db->select("SELECT * FROM users1 ORDER BY id DESC");
+    return $db->select('SELECT * FROM ' . TABLE_NAME . ' ORDER BY id DESC');
 }
 
 function db_insert(string $name, string $email): int {
     $db = db_connect();
-    return $db->insert('users1', [
+    return $db->insert(TABLE_NAME, [
         'name' => $name,
         'email' => $email,
     ]);
@@ -28,7 +29,7 @@ function db_insert(string $name, string $email): int {
 function db_update(int $id, string $name, string $email): int {
     $db = db_connect();
     return $db
-    ->update('users1')
+    ->update(TABLE_NAME)
     ->where(['id' => $id])
     ->change([
         'name' => $name,
@@ -38,7 +39,22 @@ function db_update(int $id, string $name, string $email): int {
 
 function db_delete(int $id): int {
     $db = db_connect();
-    return $db->delete('users1', ['id' => $id]);
+    return $db->delete(TABLE_NAME, ['id' => $id]);
+}
+
+function db_drop_table(): bool {
+    $db = db_connect();
+    return $db->dropTable(TABLE_NAME, true);
+}
+
+function db_create_table(): bool {
+    $db = db_connect();
+    return $db->createTable(TABLE_NAME, [
+        'id' => 'INTEGER PRIMARY KEY AUTOINCREMENT',
+        'name' => 'TEXT NOT NULL',
+        'email' => 'TEXT NOT NULL',
+        'created_dttm' => 'TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP'
+    ], true);
 }
 
 function json_response(bool $success, string $message, array $data = []): void {
@@ -104,6 +120,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 json_response(true, 'Record deleted successfully.', ['deleted' => $deleted]);
                 break;
 
+            case 'drop_table':
+                $dropped = db_drop_table();
+                json_response(true, 'Table dropped successfully.', ['dropped' => $dropped]);
+                break;
+
+            case 'create_table':
+                $created = db_create_table();
+                json_response(true, 'Table created successfully.', ['created' => $created]);
+                break;
+
             default:
                 json_response(false, 'Invalid action supplied.');
         }
@@ -149,6 +175,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 <button class="btn btn-secondary" id="btnGetAll">Get All</button>
                 <button class="btn btn-warning" id="btnUpdate">Update</button>
                 <button class="btn btn-danger" id="btnDelete">Delete</button>
+                <button class="btn btn-outline-danger" id="btnDropTable">Drop Table</button>
+                <button class="btn btn-outline-success" id="btnCreateTable">Create Table</button>
             </div>
 
             <div id="status" class="alert d-none" role="alert"></div>
@@ -174,6 +202,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 </div>
 
 <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script>
     function showStatus(success, message) {
         const $status = $('#status');
@@ -217,6 +246,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             if ((action === 'create' || action === 'update' || action === 'delete') && res.success) {
                 sendCrud('read_all');
             }
+
+            if (action === 'drop_table' && res.success) {
+                renderRows([]);
+            }
+
+            if (action === 'create_table' && res.success) {
+                sendCrud('read_all');
+            }
         }).fail(function (xhr) {
             const message = xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : 'Request failed.';
             showStatus(false, message);
@@ -228,9 +265,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
     $('#btnGetAll').on('click', function () { sendCrud('read_all'); });
     $('#btnUpdate').on('click', function () { sendCrud('update'); });
     $('#btnDelete').on('click', function () { sendCrud('delete'); });
+    $('#btnDropTable').on('click', function () {
+        Swal.fire({
+            title: 'Drop table?',
+            text: 'Are you sure you want to drop table users1? This cannot be undone.',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Yes, drop it',
+            cancelButtonText: 'Cancel'
+        }).then(function (result) {
+            if (result.isConfirmed) {
+                sendCrud('drop_table');
+            }
+        });
+    });
+    $('#btnCreateTable').on('click', function () { sendCrud('create_table'); });
 
     sendCrud('read_all');
 </script>
 </body>
-</html>
-
+</html>  
