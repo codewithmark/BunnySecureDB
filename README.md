@@ -1,9 +1,10 @@
 # 🐰 BunnySecureDB
 
+
 > A SecureDB-style PHP wrapper for Bunny.net Database  
 > Simple. Fluent. SQLite-compatible. Built for web developers.
 
-BunnySecureDB is a lightweight PHP class that connects to **Bunny.net Database (libSQL / SQLite compatible)** using the HTTP SQL API.
+BunnySecureDB is a lightweight PHP class that connects to ** Bunny.net [https://bunny.net](https://bunny.net?ref=9zzlt7jfxy) Database (libSQL / SQLite compatible)** using the HTTP SQL API.
 
 No heavy ORM.  
 No complex setup.  
@@ -13,6 +14,8 @@ Just clean CRUD.
 
 ## 🚀 Features
 
+- ✅ CREATE TABLE
+- ✅ DROP TABLE
 - ✅ SELECT
 - ✅ INSERT (single + bulk)
 - ✅ UPDATE
@@ -52,7 +55,7 @@ require_once 'BunnySecureDB.php';
 
 ```php
 $db = BunnySecureDB::getInstance([
-    'endpoint' => 'https://YOUR_DB_ID.lite.bunnydb.net/v2/pipeline',
+    'endpoint' => 'libsql://xxx.lite.bunnydb.net/',  
     'token'    => 'YOUR_ACCESS_TOKEN'
 ]);
 ```
@@ -61,6 +64,55 @@ You can find:
 
 - `endpoint` → Bunny Database dashboard
 - `token` → Access token section
+
+
+---
+
+# 🏗 CREATE TABLE
+
+## Create Table
+
+```php
+$success = $db->createTable('users', [
+    'id'    => 'INTEGER PRIMARY KEY AUTOINCREMENT',
+    'name'  => 'TEXT NOT NULL',
+    'email' => 'TEXT UNIQUE',
+    'created_at' => 'DATETIME DEFAULT CURRENT_TIMESTAMP'
+]);
+```
+
+Pass `false` as third argument to create without "IF NOT EXISTS" check:
+
+```php
+$db->createTable('users', [...], false); // Create or fail
+```
+
+Returns `true` on success.
+
+---
+
+# 🗑 DROP TABLE
+
+## Drop Table
+
+```php
+$success = $db->dropTable('users');
+```
+
+Alias method `deleteTable()` also available:
+
+```php
+$success = $db->deleteTable('users');
+```
+
+Pass `false` as second argument to drop without "IF EXISTS" check:
+
+```php
+$db->dropTable('users', false); // Drop or fail
+```
+
+Returns `true` on success.
+
 
 ---
 
@@ -189,7 +241,7 @@ $deleted = $db
 
 Returns number of deleted rows.
 
----
+
 
 # 🧪 Raw Query Helper
 
@@ -283,3 +335,7 @@ Keep it simple. Keep it clean.
 # 📜 License
 
 MIT License
+
+---
+
+[https://codewithmark.com](https://codewithmark.com)
