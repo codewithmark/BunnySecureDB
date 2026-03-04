@@ -4,7 +4,7 @@
 > A SecureDB-style PHP wrapper for Bunny.net Database  
 > Simple. Fluent. SQLite-compatible. Built for web developers.
 
-BunnySecureDB is a lightweight PHP class that connects to ** Bunny.net [https://bunny.net](https://bunny.net?ref=9zzlt7jfxy) Database (libSQL / SQLite compatible)** using the HTTP SQL API.
+BunnySecureDB is a lightweight PHP class that connects to ** [https://bunny.net](https://bunny.net?ref=9zzlt7jfxy) Database (libSQL / SQLite compatible)** using the HTTP SQL API.
 
 No heavy ORM.  
 No complex setup.  
