@@ -64,8 +64,8 @@
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <script src="BunnyCDN-DB.js"></script>
 <script>
-    const DB_ENDPOINT = 'libsql://01KJXDSC9FCTHXQCTGD5AM3A1R-test-v2.lite.bunnydb.net/';
-    const DB_TOKEN = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9.eyJwIjp7InJvIjpudWxsLCJydyI6eyJucyI6WyJ0ZXN0LXYyIl0sInRhZ3MiOm51bGx9LCJyb2EiOm51bGwsInJ3YSI6bnVsbCwiZGRsIjpudWxsfSwiaWF0IjoxNzcyNjgxNDY3fQ.o5DTPA9mhzdwFTFU8RLWeTPFFPV4pttD3LgebWR9BMHakqt5Gw5ch-WKrLA0W73gGnyTHRucwrqXKJrx4DBOCw';
+    const DB_ENDPOINT = 'libsql://xxxx.lite.bunnydb.net/';
+    const DB_TOKEN = 'YOUR_TOKEN';
 
     const TABLE_NAME = 'users';
 
